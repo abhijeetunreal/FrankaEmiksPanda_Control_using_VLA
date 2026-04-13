@@ -1,0 +1,4 @@
+mujoco
+opencv-python
+numpy
+openai
