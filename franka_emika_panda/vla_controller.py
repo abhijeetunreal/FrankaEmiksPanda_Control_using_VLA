@@ -11,10 +11,17 @@ from openai import OpenAI
 # ---------------------------------------------------------
 # 1. Configuration (Using GROQ)
 # ---------------------------------------------------------
-# SECURITY WARNING: Delete this key from console.groq.com after testing!
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+
+if not GROQ_API_KEY:
+    raise RuntimeError(
+        "Missing GROQ_API_KEY environment variable. Set it before running the script."
+    )
+
 client = OpenAI(
-    api_key=os.environ.get("GROQ_API_KEY"),
-    base_url=os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+    api_key=GROQ_API_KEY,
+    base_url=GROQ_BASE_URL
 )
 
 system_instruction = """

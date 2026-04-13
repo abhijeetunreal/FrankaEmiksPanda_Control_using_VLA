@@ -85,9 +85,28 @@ Then enter commands at the prompt, for example:
 ## Notes on configuration
 
 - `franka_emika_panda/vla_controller.py` uses the OpenAI-compatible `openai` client.
-- The script currently contains a placeholder API configuration block.
-- Replace the API key and endpoint with your own secure credentials before use.
+- The script reads `GROQ_API_KEY` from the environment instead of storing it in code.
+- Set `GROQ_API_KEY` locally before running the project.
+- Optionally set `GROQ_BASE_URL` if your API endpoint differs from the default.
 - Do not commit your API key into GitHub.
+
+## Environment variables
+
+Create a `.env` file or set these variables in your shell:
+
+```powershell
+setx GROQ_API_KEY "your_groq_api_key_here"
+setx GROQ_BASE_URL "https://api.groq.com/openai/v1"
+```
+
+On PowerShell for the current session only:
+
+```powershell
+$env:GROQ_API_KEY = "your_groq_api_key_here"
+$env:GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+```
+
+If you prefer a file-based example, copy `.env.example` to `.env` and fill in your key.
 
 ## How it works
 

@@ -117,6 +117,7 @@ mjkey.txt
 # Ignore local run scripts or environment files if created
 .env
 .env.*
+!.env.example
 
 # Ignore temporary files
 *.tmp
