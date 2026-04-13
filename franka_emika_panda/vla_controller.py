@@ -11,6 +11,24 @@ from openai import OpenAI
 # ---------------------------------------------------------
 # 1. Configuration (Using GROQ)
 # ---------------------------------------------------------
+
+def load_dotenv(path):
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+load_dotenv(os.path.join(root_dir, ".env"))
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
