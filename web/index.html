@@ -8,40 +8,56 @@
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <div class="workspace">
-      <div class="panel viewport" id="viewport-wrap">
-        <div class="viewport-inner">
-          <span class="overlay-hint">
-            Left-drag orbit · Wheel zoom · Right-drag pan · Shift+left drag object
-          </span>
-          <img id="frame" alt="MuJoCo scene" draggable="false" hidden />
-          <span id="frame-wait" class="muted">Waiting for video…</span>
-        </div>
-      </div>
+    <div class="app-shell">
+      <header class="titlebar" role="banner">
+        <span class="titlebar-brand">FRANKA EMICA PANDA</span>
+        <span class="titlebar-meta">Workspace</span>
+      </header>
+      <div class="workspace">
+        <div class="left-pane">
+          <div class="editor-stack">
+            <div class="tab-bar" role="tablist">
+              <div class="tab tab--active" role="tab" aria-selected="true">
+                <span class="tab-icon" aria-hidden="true">◆</span>
+                MuJoCo Scene
+              </div>
+            </div>
+            <div class="panel viewport" id="viewport-wrap">
+              <div class="viewport-inner">
+                
+                <img id="frame" alt="MuJoCo scene" draggable="false" hidden />
+                <span id="frame-wait" class="muted">Waiting for video…</span>
+              </div>
+            </div>
+          </div>
 
-      <div class="panel terminal">
-        <div class="terminal-header">Terminal</div>
-        <div class="terminal-body" id="terminal"></div>
-      </div>
-
-      <div class="panel chat">
-        <div class="chat-header">
-          <span>Chat</span>
-          <div class="chat-tools">
-            <button type="button" id="mic-btn" title="Voice input">Mic</button>
-            <button type="button" id="speak-btn" title="Voice output">Speak: On</button>
-            <span id="status" class="status">Connecting…</span>
+          <div class="panel terminal">
+            <div class="terminal-header">Terminal</div>
+            <div class="terminal-body" id="terminal"></div>
           </div>
         </div>
-        <div class="messages" id="messages"></div>
-        <div class="chat-input-row">
-          <input
-            type="text"
-            id="cmd-input"
-            placeholder="Natural language command…"
-            autocomplete="off"
-          />
-          <button type="button" id="send-btn">Send</button>
+
+        <div id="chat-resizer" class="pane-resizer" role="separator" aria-label="Resize chat panel" aria-orientation="vertical"></div>
+
+        <div class="panel chat" id="chat-pane">
+          <div class="chat-header">
+            <span>Chat</span>
+            <div class="chat-tools">
+              <button type="button" id="speak-btn" title="Toggle voice output">Speak: On</button>
+              <span id="status" class="status">Connecting…</span>
+            </div>
+          </div>
+          <div class="messages" id="messages"></div>
+          <div class="chat-input-row">
+            <input
+              type="text"
+              id="cmd-input"
+              placeholder="Natural language command…"
+              autocomplete="off"
+            />
+            <button type="button" id="mic-btn" class="icon-btn" title="Voice input" aria-label="Voice input">🎤</button>
+            <button type="button" id="send-btn">Send</button>
+          </div>
         </div>
       </div>
     </div>

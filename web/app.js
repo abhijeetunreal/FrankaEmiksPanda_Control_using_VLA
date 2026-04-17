@@ -15,6 +15,9 @@
   var viewportWrap = document.getElementById("viewport-wrap");
   var micBtn = document.getElementById("mic-btn");
   var speakBtn = document.getElementById("speak-btn");
+  var workspace = document.querySelector(".workspace");
+  var chatPane = document.getElementById("chat-pane");
+  var chatResizer = document.getElementById("chat-resizer");
 
   var logLines = [];
   var ws = null;
@@ -39,6 +42,7 @@
   var recognition = null;
   var recognitionSupported = false;
   var isListening = false;
+  var resizingChat = false;
 
   function wsUrl() {
     // Force a stable endpoint. Some embedded webviews/pages rewrite location.host,
@@ -70,17 +74,40 @@
       var utter = new SpeechSynthesisUtterance(text);
       var voices = window.speechSynthesis.getVoices() || [];
       var preferred = null;
-      for (var i = 0; i < voices.length; i++) {
-        var n = (voices[i].name || "").toLowerCase();
-        if (n.indexOf("natural") >= 0 || n.indexOf("neural") >= 0 || n.indexOf("aria") >= 0 || n.indexOf("guy") >= 0 || n.indexOf("jenny") >= 0) {
-          preferred = voices[i];
-          break;
+      var preferredVoicePatterns = [
+        "jenny",
+        "aria",
+        "zira",
+        "sara",
+        "emma",
+        "olivia",
+        "female"
+      ];
+      // Force female voice preference with natural/neural variants first.
+      for (var p = 0; p < preferredVoicePatterns.length && !preferred; p++) {
+        var pattern = preferredVoicePatterns[p];
+        for (var i = 0; i < voices.length; i++) {
+          var n = (voices[i].name || "").toLowerCase();
+          if (n.indexOf(pattern) >= 0 && (n.indexOf("natural") >= 0 || n.indexOf("neural") >= 0)) {
+            preferred = voices[i];
+            break;
+          }
+        }
+      }
+      for (var p2 = 0; p2 < preferredVoicePatterns.length && !preferred; p2++) {
+        var pattern2 = preferredVoicePatterns[p2];
+        for (var j = 0; j < voices.length; j++) {
+          var n2 = (voices[j].name || "").toLowerCase();
+          if (n2.indexOf(pattern2) >= 0) {
+            preferred = voices[j];
+            break;
+          }
         }
       }
       if (!preferred && voices.length > 0) preferred = voices[0];
       if (preferred) utter.voice = preferred;
-      utter.rate = 0.95;
-      utter.pitch = 1.02;
+      utter.rate = 0.92;
+      utter.pitch = 1.12;
       utter.volume = 1.0;
       window.speechSynthesis.speak(utter);
     } catch (e) {
@@ -116,7 +143,7 @@
 
   function planToSentence(plan) {
     if (!Array.isArray(plan) || plan.length === 0) {
-      return "I could not build a valid action plan for that command.";
+      return "I could not map that to a safe action plan yet. Could you rephrase it a bit?";
     }
     var actions = [];
     for (var i = 0; i < plan.length && i < 4; i++) {
@@ -127,12 +154,12 @@
       }
       actions.push(a);
     }
-    var suffix = plan.length > 4 ? " and then continue with the remaining steps." : ".";
+    var suffix = plan.length > 4 ? ", then I will continue with the remaining steps." : ".";
     var starters = [
-      "Nice. I will ",
-      "Sounds good. I will ",
-      "Perfect, I will ",
-      "On it. I will "
+      "Sounds good, I will ",
+      "Alright, I will ",
+      "Got it, I will ",
+      "Great, I will "
     ];
     var start = starters[Math.floor(Math.random() * starters.length)];
     return start + actions.join(", then ") + suffix;
@@ -142,16 +169,16 @@
     var t = String(text || "").trim().toLowerCase();
     if (!t) return { kind: "empty", reply: "" };
     if (/^(hi|hello|hey|yo|hola)\b/.test(t)) {
-      return { kind: "chat", reply: "Hi there." };
+      return { kind: "chat", reply: "Hey! Good to see you." };
     }
     if (/are you ready|ready\??$|you ready/.test(t)) {
-      return { kind: "chat", reply: "Yeah, I am always ready. What should I do?" };
+      return { kind: "chat", reply: "Yes, I am ready. What should we do first?" };
     }
     if (/how are you|how's it going/.test(t)) {
-      return { kind: "chat", reply: "I am doing great. Tell me what you want me to do." };
+      return { kind: "chat", reply: "I am doing great. What do you want me to do next?" };
     }
     if (/thank(s| you)?/.test(t)) {
-      return { kind: "chat", reply: "Anytime." };
+      return { kind: "chat", reply: "You are welcome. Happy to help." };
     }
     // Treat these as robot-action requests.
     return { kind: "command", reply: "" };
@@ -338,6 +365,70 @@
     };
   }
 
+  function isCompactLayout() {
+    return window.matchMedia("(max-width: 900px)").matches;
+  }
+
+  function clampChatWidth(widthPx) {
+    if (!workspace) return widthPx;
+    var totalWidth = workspace.getBoundingClientRect().width;
+    var minWidth = 280;
+    var maxWidth = Math.min(700, Math.max(minWidth, totalWidth - 320));
+    return Math.max(minWidth, Math.min(maxWidth, widthPx));
+  }
+
+  function setChatWidth(widthPx) {
+    if (!workspace || isCompactLayout()) return;
+    var safeWidth = clampChatWidth(widthPx);
+    workspace.style.setProperty("--chat-width", safeWidth + "px");
+    try {
+      window.localStorage.setItem("chatPanelWidth", String(Math.round(safeWidth)));
+    } catch (err) {}
+  }
+
+  function restoreChatWidth() {
+    if (!workspace || isCompactLayout()) return;
+    var parsed = NaN;
+    try {
+      parsed = parseInt(window.localStorage.getItem("chatPanelWidth") || "", 10);
+    } catch (err) {}
+    if (!isNaN(parsed)) {
+      setChatWidth(parsed);
+      return;
+    }
+    if (chatPane) {
+      setChatWidth(chatPane.getBoundingClientRect().width || 340);
+    }
+  }
+
+  function onChatResizeStart(e) {
+    if (!chatResizer || isCompactLayout()) return;
+    resizingChat = true;
+    workspace.classList.add("resizing");
+    if (chatResizer.setPointerCapture) {
+      chatResizer.setPointerCapture(e.pointerId);
+    }
+    e.preventDefault();
+  }
+
+  function onChatResizeMove(e) {
+    if (!resizingChat || !workspace || isCompactLayout()) return;
+    var rect = workspace.getBoundingClientRect();
+    var nextWidth = rect.right - e.clientX;
+    setChatWidth(nextWidth);
+  }
+
+  function onChatResizeEnd(e) {
+    if (!resizingChat) return;
+    resizingChat = false;
+    workspace.classList.remove("resizing");
+    if (chatResizer && chatResizer.releasePointerCapture) {
+      try {
+        chatResizer.releasePointerCapture(e.pointerId);
+      } catch (err) {}
+    }
+  }
+
   function sendCommandFromText(text) {
     var t = String(text || "").trim();
     if (!t || busy || !connected) return;
@@ -352,10 +443,10 @@
     pendingRobotCommand = true;
     sendWs({ type: "command", text: t });
     var replies = [
-      "Got it, on it.",
-      "Perfect, I will do that now.",
-      "Okay, I will handle it.",
-      "Sure, I am doing it now."
+      "Got it, I am on it.",
+      "Perfect, I will handle that now.",
+      "Okay, I am taking care of it.",
+      "Sure thing, I will do that now."
     ];
     assistantSay(replies[Math.floor(Math.random() * replies.length)], true);
   }
@@ -369,12 +460,14 @@
 
   function updateMicButton() {
     if (!recognitionSupported) {
-      micBtn.textContent = "Mic: N/A";
+      micBtn.textContent = "🚫";
+      micBtn.title = "Voice input unavailable";
       micBtn.disabled = true;
       return;
     }
     micBtn.disabled = false;
-    micBtn.textContent = isListening ? "Mic: On" : "Mic";
+    micBtn.textContent = "🎤";
+    micBtn.title = isListening ? "Stop voice input" : "Start voice input";
     micBtn.classList.toggle("active", isListening);
   }
 
@@ -399,7 +492,6 @@
     recognition.onstart = function () {
       isListening = true;
       updateMicButton();
-      assistantSay("I am listening.", false);
     };
 
     recognition.onresult = function (event) {
@@ -449,6 +541,13 @@
   frame.addEventListener("pointercancel", onPointerUp);
   frame.addEventListener("wheel", onWheel, { passive: false });
   frame.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+  if (chatResizer) {
+    chatResizer.addEventListener("pointerdown", onChatResizeStart);
+    window.addEventListener("pointermove", onChatResizeMove);
+    window.addEventListener("pointerup", onChatResizeEnd);
+    window.addEventListener("pointercancel", onChatResizeEnd);
+    window.addEventListener("resize", restoreChatWidth);
+  }
 
   micBtn.addEventListener("click", toggleMic);
   speakBtn.addEventListener("click", function () {
@@ -469,6 +568,7 @@
     };
   }
   updateSpeakButton();
+  restoreChatWidth();
   connect();
 })();
 
