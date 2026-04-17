@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VLA MuJoCo Workspace</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="workspace">
+      <div class="panel viewport" id="viewport-wrap">
+        <div class="viewport-inner">
+          <span class="overlay-hint">
+            Left-drag orbit · Wheel zoom · Right-drag pan · Shift+left drag object
+          </span>
+          <img id="frame" alt="MuJoCo scene" draggable="false" hidden />
+          <span id="frame-wait" class="muted">Waiting for video…</span>
+        </div>
+      </div>
+
+      <div class="panel terminal">
+        <div class="terminal-header">Terminal</div>
+        <div class="terminal-body" id="terminal"></div>
+      </div>
+
+      <div class="panel chat">
+        <div class="chat-header">
+          <span>Chat</span>
+          <div class="chat-tools">
+            <button type="button" id="mic-btn" title="Voice input">Mic</button>
+            <button type="button" id="speak-btn" title="Voice output">Speak: On</button>
+            <span id="status" class="status">Connecting…</span>
+          </div>
+        </div>
+        <div class="messages" id="messages"></div>
+        <div class="chat-input-row">
+          <input
+            type="text"
+            id="cmd-input"
+            placeholder="Natural language command…"
+            autocomplete="off"
+          />
+          <button type="button" id="send-btn">Send</button>
+        </div>
+      </div>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

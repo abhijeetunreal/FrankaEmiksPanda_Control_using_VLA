@@ -122,3 +122,7 @@ mjkey.txt
 # Ignore temporary files
 *.tmp
 *.temp
+
+# Web UI (optional leftover from old npm install — safe to delete)
+web/node_modules/
+web/dist/

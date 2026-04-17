@@ -1,11 +1,9 @@
 import mujoco
-import mujoco.viewer
 import cv2
 import time
 import json
 import numpy as np
 import os
-import re
 import base64
 from openai import OpenAI
 
@@ -14,9 +12,10 @@ from openai import OpenAI
 # ---------------------------------------------------------
 
 def load_dotenv(path):
+    """Load KEY=VALUE lines from a .env file. Non-empty values override existing env (so .env wins over empty/stale OS vars)."""
     if not os.path.exists(path):
         return
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -24,7 +23,7 @@ def load_dotenv(path):
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
+            if key and value:
                 os.environ[key] = value
 
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -33,15 +32,43 @@ load_dotenv(os.path.join(root_dir, ".env"))
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "Missing GROQ_API_KEY environment variable. Set it before running the script."
-    )
+_openai_client = None
 
-client = OpenAI(
-    api_key=GROQ_API_KEY,
-    base_url=GROQ_BASE_URL
-)
+
+def get_openai_client():
+    """Lazy OpenAI client so imports work without GROQ_API_KEY (e.g. tests)."""
+    global _openai_client
+    if _openai_client is None:
+        key = os.environ.get("GROQ_API_KEY")
+        if not key:
+            raise RuntimeError(
+                "Missing GROQ_API_KEY environment variable. Set it before calling the VLA API."
+            )
+        _openai_client = OpenAI(api_key=key, base_url=GROQ_BASE_URL)
+    return _openai_client
+
+
+_frame_hook = None
+_frame_hook_stride = 5
+_frame_hook_counter = [0]
+
+
+def set_frame_hook(callback, stride=5):
+    """Optional hook invoked during headless sync (throttled) so the web UI can stream while IK runs."""
+    global _frame_hook, _frame_hook_stride
+    _frame_hook = callback
+    _frame_hook_stride = max(1, int(stride))
+
+
+def sync_viewer(viewer):
+    """No-op when viewer is None (headless / web mode)."""
+    if viewer is not None:
+        viewer.sync()
+    fn = _frame_hook
+    if fn is not None:
+        _frame_hook_counter[0] += 1
+        if _frame_hook_counter[0] % _frame_hook_stride == 0:
+            fn()
 
 system_instruction = """
 You are a robotic Vision-Language-Action (VLA) controller.
@@ -169,7 +196,7 @@ def solve_ik(target_pos, m, d, viewer, steps=300):
             d.ctrl[i] += dq[i] * 0.05 
             
         mujoco.mj_step(m, d)
-        viewer.sync()
+        sync_viewer(viewer)
         time.sleep(0.005)
 
 # ---------------------------------------------------------
@@ -178,7 +205,16 @@ def solve_ik(target_pos, m, d, viewer, steps=300):
 def encode_image(image_path):
     """Converts local image to base64 for the API."""
     with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
+
+def encode_image_rgb(rgb: np.ndarray) -> str:
+    """RGB uint8 (H, W, 3) -> base64 JPEG string for the vision API."""
+    rgb = np.ascontiguousarray(np.asarray(rgb, dtype=np.uint8).copy())
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    if not ok:
+        raise RuntimeError("JPEG encode failed")
+    return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 def normalize_target_name(name):
     if not name:
@@ -285,14 +321,18 @@ def sanitize_execution_plan(plan, user_command, d):
     return filtered
 
 
-def get_vla_plan(image_path, user_command):
+def get_vla_plan(user_command, image_path=None, rgb=None):
+    """Request a VLA plan from Groq. Pass either ``image_path`` or ``rgb`` (H,W,3 uint8)."""
     print("\n[VLA] Processing image with Groq (Llama 3.2 Vision)...")
-    
-    base64_image = encode_image(image_path)
-    
+    if rgb is not None:
+        base64_image = encode_image_rgb(rgb)
+    elif image_path:
+        base64_image = encode_image(image_path)
+    else:
+        raise ValueError("get_vla_plan requires image_path or rgb")
+
     try:
-        
-        response = client.chat.completions.create(
+        response = get_openai_client().chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct", # <--- New, active Llama 4 Vision model
             messages=[
                 {
@@ -349,7 +389,7 @@ def is_near_ready_pose(m, d):
 def settle_physics(m, d, viewer, steps=EMOTE_SETTLE_STEPS):
     for _ in range(steps):
         mujoco.mj_step(m, d)
-        viewer.sync()
+        sync_viewer(viewer)
         time.sleep(0.005)
 
 
@@ -395,7 +435,7 @@ def slew_joint7_to(m, d, viewer, target_angle, interp_steps=40, hold_each=4):
         d.ctrl[6] = start + alpha * (target_angle - start)
         for _ in range(hold_each):
             mujoco.mj_step(m, d)
-            viewer.sync()
+            sync_viewer(viewer)
             time.sleep(0.003)
 
 
@@ -404,7 +444,7 @@ def set_gripper_quick(ctrl_value, m, d, viewer, steps=40):
         d.ctrl[i] = ctrl_value
     for _ in range(steps):
         mujoco.mj_step(m, d)
-        viewer.sync()
+        sync_viewer(viewer)
         time.sleep(0.003)
 
 
@@ -506,7 +546,7 @@ def set_gripper(ctrl_value, m, d, viewer, steps=GRIPPER_MOVE_STEPS):
         d.ctrl[i] = ctrl_value
     for _ in range(steps):
         mujoco.mj_step(m, d)
-        viewer.sync()
+        sync_viewer(viewer)
         time.sleep(0.005)
 
 
@@ -538,7 +578,7 @@ def approach_object(target_pos, m, d, viewer):
     # settle the final pose after the last descent so the gripper does not bounce back
     for _ in range(20):
         mujoco.mj_step(m, d)
-        viewer.sync()
+        sync_viewer(viewer)
         time.sleep(0.005)
 
 
@@ -597,27 +637,40 @@ def execute_plan(plan, m, d, viewer, user_command=None):
         prev_action = action
 
 # ---------------------------------------------------------
-# 4. Main Loop
+# 4. Session init & CLI main
 # ---------------------------------------------------------
-def main():
-    print("Loading Franka Panda Environment...")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    xml_path = os.path.join(script_dir, 'vla_scene.xml')
-    
+def default_xml_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "vla_scene.xml")
+
+
+def init_mujoco_session(xml_path=None):
+    """Load model, reset arm and gripper to defaults, mj_forward."""
+    if xml_path is None:
+        xml_path = default_xml_path()
     m = mujoco.MjModel.from_xml_path(xml_path)
     d = mujoco.MjData(m)
-    
     d.qpos[:7] = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]
     d.ctrl[:7] = d.qpos[:7]
     for i in range(7, len(d.ctrl)):
         d.ctrl[i] = GRIPPER_OPEN
     mujoco.mj_forward(m, d)
-    
+    return m, d
+
+
+def main():
+    import mujoco.viewer
+
+    print("Loading Franka Panda Environment...")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    xml_path = os.path.join(script_dir, "vla_scene.xml")
+
+    m, d = init_mujoco_session(xml_path)
+
     renderer = mujoco.Renderer(m, 480, 640)
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         for _ in range(200):
-            mujoco.mj_step(m, d); viewer.sync()
+            mujoco.mj_step(m, d); sync_viewer(viewer)
             
         while True:
             cmd = input("\nEnter robot command (or 'quit'): ")
@@ -627,7 +680,7 @@ def main():
             image_path = os.path.join(script_dir, "current_state.jpg")
             cv2.imwrite(image_path, cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR))
             
-            plan = get_vla_plan(image_path, cmd)
+            plan = get_vla_plan(cmd, image_path=image_path)
             if plan:
                 plan = sanitize_execution_plan(plan, cmd, d)
                 print(json.dumps(plan, indent=2))

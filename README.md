@@ -16,56 +16,64 @@ This repository contains a MuJoCo-based Vision-Language-Action (VLA) prototype f
 - Gripper open/close control.
 - Language-driven commands like `move to red box`, `hover over blue box`, `close gripper`, and `move home`.
 - Uses an LLM API configured in the controller to translate text + image into JSON action plans.
+- **Web workspace**: a browser UI (plain HTML/CSS/JS) with a live MuJoCo viewport, chat, terminal log, and drag-to-move objects (`server/`, `web/`).
 
 ## Project structure
 
 - `franka_emika_panda/`
-  - `vla_controller.py` — main VLA controller script.
+  - `vla_controller.py` — main VLA controller script (CLI; also used by the web backend).
+  - `sim_service.py` — headless MuJoCo loop, WebSocket command queue, object dragging.
   - `vla_scene.xml` — MuJoCo scene with the Panda robot and objects.
   - `panda.xml`, `scene.xml`, `mjx_*.xml` — robot model and scene files.
   - `README.md` — model-specific documentation for the Panda MJCF/MJX assets.
+- `server/` — FastAPI app and WebSocket (`server/app.py`).
+- `web/` — static workspace UI: `index.html`, `app.js`, `app.css` (no Node.js build step).
 - `requirements.txt` — Python dependencies.
-- `run.bat` — Windows helper to create/activate a venv, install dependencies, and run the controller.
+- `run.bat` — **Windows launcher:** creates/updates `venv`, installs dependencies, starts the API server in a new window, opens **http://127.0.0.1:8000** in your browser.
+- `launcher_api.bat` — helper used by `run.bat` to run uvicorn (you can ignore it unless debugging).
 - `.gitignore` — excludes temporary files, virtual environment folders, MuJoCo keys, and logs.
 
 ## Requirements
 
 - Python 3.10+.
 - MuJoCo 2.3.3 or later.
-- A valid MuJoCo license key installed locally (e.g. `mjkey.txt`).
+- A valid MuJoCo license key installed locally (e.g. `mjkey.txt`), if your MuJoCo build still requires it.
 - GPU or CPU support for MuJoCo depending on your local setup.
+- **Web UI:** no Node.js required — the interface is static files served by FastAPI.
 
 ## Setup
 
-### Windows (recommended)
+### Windows (recommended) — web workspace
+
+1. Set **`GROQ_API_KEY`** (see [Environment variables](#environment-variables)).
+2. Double-click **`run.bat`** in the repository root (or run `.\run.bat` in PowerShell).
+
+It creates `venv` if needed, installs Python packages, starts the server in a **new console window**, waits until **http://127.0.0.1:8000** responds, then opens your **browser** to the workspace. Close the **VLA Server** window to stop.
+
+### Manual venv (optional)
 
 1. Open a PowerShell prompt in the repository root.
 2. Run:
 
    ```powershell
-   .\run.bat
-   ```
-
-This will create a virtual environment in `venv/`, install the required packages, verify imports, and then launch the controller.
-
-### Manual setup
-
-1. Create and activate a Python virtual environment:
-
-   ```powershell
    python -m venv venv
    .\venv\Scripts\Activate.ps1
-   ```
-
-2. Install dependencies:
-
-   ```powershell
    pip install -r requirements.txt
    ```
 
-3. Make sure MuJoCo is installed and your license file is available.
+3. Start the server:
 
-## Running the controller
+   ```powershell
+   python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
+   ```
+
+4. Open **http://127.0.0.1:8000** in your browser.
+
+Make sure MuJoCo is installed and any required license file is available.
+
+In the workspace: drag colored objects on the table; use the chat panel for natural-language commands; watch execution output in the terminal panel.
+
+## Running the CLI controller (no browser)
 
 From the repository root, run:
 
@@ -108,23 +116,25 @@ $env:GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 If you prefer a file-based example, copy `.env.example` to `.env` and fill in your key.
 
+The project loads `.env` from the **repository root**. Non-empty values in `.env` override existing environment variables (so a real key in `.env` is used even if Windows has an empty `GROQ_API_KEY`).
+
 ## How it works
 
-1. The script loads `vla_scene.xml` and creates a MuJoCo model and simulation data.
-2. A passive MuJoCo viewer is launched for visualization.
-3. The script captures a rendered image from the scene and saves it temporarily.
-4. It sends the image and the user command to an LLM API.
-5. The API returns a JSON action plan like:
-   
-   ```json
-   [
-     {"action": "hover_over_object", "target_name": "red_box"},
-     {"action": "move_to_object", "target_name": "red_box"},
-     {"action": "close_gripper"}
-   ]
-   ```
+**Web workspace:** FastAPI runs a MuJoCo simulation thread and streams JPEG frames plus logs over a WebSocket; the browser UI in `web/` connects to `/ws` and serves from the same origin on port 8000.
 
-6. The controller executes the plan by moving the arm, hovering, and operating the gripper.
+**CLI:** The script loads `vla_scene.xml` and creates a MuJoCo model and simulation data. A passive MuJoCo viewer is launched for visualization. It captures a rendered image, sends the image and the user command to an LLM API.
+
+In both modes, the LLM returns a JSON action plan like:
+
+```json
+[
+  {"action": "hover_over_object", "target_name": "red_box"},
+  {"action": "move_to_object", "target_name": "red_box"},
+  {"action": "close_gripper"}
+]
+```
+
+The controller then executes the plan by moving the arm, hovering, and operating the gripper.
 
 ## Known limitations
 
