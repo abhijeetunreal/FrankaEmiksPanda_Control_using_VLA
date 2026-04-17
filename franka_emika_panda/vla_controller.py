@@ -5,6 +5,7 @@ import time
 import json
 import numpy as np
 import os
+import re
 import base64
 from openai import OpenAI
 
@@ -150,6 +151,73 @@ def sanitize_plan_targets(plan, user_command):
             elif command_target:
                 step["target_name"] = command_target
     return plan
+
+
+def get_gripper_position(d):
+    if len(d.ctrl) <= 7:
+        return GRIPPER_OPEN
+    return float(np.mean(d.ctrl[7:]))
+
+
+def is_gripper_open(d):
+    return get_gripper_position(d) >= (GRIPPER_OPEN + GRIPPER_CLOSED) / 2
+
+
+def plan_needs_open_before_grasp(plan, user_command):
+    if not isinstance(plan, list):
+        return False
+    if not any(step.get("action") == "close_gripper" for step in plan):
+        return False
+    return any(step.get("action") in ["move_to_object", "hover_over_object"] for step in plan)
+
+
+def sanitize_execution_plan(plan, user_command, d):
+    command_target = get_target_from_command(user_command)
+    sanitized = []
+    last_step = None
+
+    for step in plan:
+        action = step.get("action")
+        new_step = dict(step)
+
+        if action in ["move_to_object", "hover_over_object"]:
+            normalized = normalize_target_name(step.get("target_name"))
+            new_step["target_name"] = normalized or command_target
+
+        if last_step and action == last_step.get("action") and new_step.get("target_name") == last_step.get("target_name"):
+            continue
+        if action in ["open_gripper", "close_gripper"] and last_step and last_step.get("action") == action:
+            continue
+
+        sanitized.append(new_step)
+        last_step = new_step
+
+    if plan_needs_open_before_grasp(sanitized, user_command) and not is_gripper_open(d):
+        already_open_before_move = False
+        for step in sanitized:
+            if step.get("action") == "open_gripper":
+                already_open_before_move = True
+                break
+            if step.get("action") in ["move_to_object", "hover_over_object"]:
+                break
+
+        if not already_open_before_move:
+            insert_index = 0
+            for i, step in enumerate(sanitized):
+                if step.get("action") in ["move_to_object", "hover_over_object"]:
+                    insert_index = i
+                    break
+            sanitized.insert(insert_index, {"action": "open_gripper"})
+
+    optimized = []
+    for i, step in enumerate(sanitized):
+        if step.get("action") == "hover_over_object" and i + 1 < len(sanitized):
+            next_step = sanitized[i + 1]
+            if next_step.get("action") == "move_to_object" and step.get("target_name") == next_step.get("target_name"):
+                continue
+        optimized.append(step)
+
+    return optimized
 
 
 def get_vla_plan(image_path, user_command):
@@ -303,6 +371,7 @@ def main():
             
             plan = get_vla_plan(image_path, cmd)
             if plan:
+                plan = sanitize_execution_plan(plan, cmd, d)
                 print(json.dumps(plan, indent=2))
                 execute_plan(plan, m, d, viewer, cmd)
             else:
