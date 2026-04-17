@@ -46,22 +46,37 @@ client = OpenAI(
 system_instruction = """
 You are a robotic Vision-Language-Action (VLA) controller.
 Analyze the provided image of the robot workspace and the user's natural language command.
-Break the user's command down into a sequence of actionable primitives. 
+Break the user's command down into a sequence of actionable primitives.
 
-Available actions:
+Manipulation actions:
 1. "move_to_object": requires a "target_name" (e.g., "red_box", "blue_box", "green_box").
-2. "hover_over_object": moves 15cm above the object, requires "target_name".
+2. "hover_over_object": moves above the object, requires "target_name".
 3. "close_gripper": grasps the object.
 4. "open_gripper": releases the object.
-5. "move_home": moves the arm back to a neutral position.
+5. "move_home": moves the arm back to a neutral ready pose (same as pre-emote home).
+
+Fun / emote actions (no target_name; the arm has no separate head — nod/shake are end-effector motions):
+6. "emote_nod": nod "yes" (vertical motion at the ready pose).
+7. "emote_shake_no": shake side-to-side for "no".
+8. "emote_wave": friendly side wave.
+9. "emote_dance": short celebratory motion sequence.
+10. "emote_clap": rapid gripper open/close like clapping (uses ready pose height).
+11. "emote_yes": one clear affirmative nod (shorter than emote_nod).
+12. "emote_no": short "no" shake (shorter than emote_shake_no).
+13. "emote_rotate_wrist": spin the wrist (joint 7) at the ready pose.
+14. "emote_bow": single smooth bow (lower and rise).
+15. "emote_celebrate": brief raise upward then return (handled as part of the motion).
 
 Object names in this scene:
 - red_box (red cube)
 - blue_box (blue cube)
 - green_box (green sphere)
 
+For commands like nod, dance, clap, say yes/no, wave, bow, celebrate, or rotate wrist, output the matching emote_* action(s). Each emote is automatically run from the ready pose and the arm returns to ready afterward — you do not need to insert extra move_home before/after emotes unless mixing with manipulation.
+
 Output ONLY a valid JSON array of action objects. Do not include any conversational text.
-Example: [{"action": "hover_over_object", "target_name": "red_box"}, {"action": "move_to_object", "target_name": "red_box"}, {"action": "close_gripper"}]
+Example grasp: [{"action": "hover_over_object", "target_name": "red_box"}, {"action": "move_to_object", "target_name": "red_box"}, {"action": "close_gripper"}]
+Example emote: [{"action": "emote_dance"}]
 """
 
 TARGET_NAME_MAP = {
@@ -80,6 +95,48 @@ TARGET_NAME_MAP = {
     "green": "green_box",
 }
 VALID_TARGETS = set(TARGET_NAME_MAP.values())
+
+FUN_ACTIONS = frozenset(
+    {
+        "emote_nod",
+        "emote_shake_no",
+        "emote_wave",
+        "emote_dance",
+        "emote_clap",
+        "emote_yes",
+        "emote_no",
+        "emote_rotate_wrist",
+        "emote_bow",
+        "emote_celebrate",
+    }
+)
+
+KNOWN_PLAN_ACTIONS = frozenset(
+    {
+        "move_to_object",
+        "hover_over_object",
+        "close_gripper",
+        "open_gripper",
+        "move_home",
+    }
+) | FUN_ACTIONS
+
+# Chained pick/place steps stay at the workspace; do not return home between these.
+MID_MANIPULATION_ACTIONS = frozenset(
+    {
+        "move_to_object",
+        "hover_over_object",
+        "open_gripper",
+        "close_gripper",
+    }
+)
+
+
+def _skip_ensure_home_before_step(prev_action, action):
+    """Avoid breaking grasp sequences: only skip when continuing mid-manipulation."""
+    if prev_action is None:
+        return False
+    return prev_action in MID_MANIPULATION_ACTIONS and action in MID_MANIPULATION_ACTIONS
 
 
 # ---------------------------------------------------------
@@ -217,7 +274,15 @@ def sanitize_execution_plan(plan, user_command, d):
                 continue
         optimized.append(step)
 
-    return optimized
+    filtered = []
+    for step in optimized:
+        act = step.get("action")
+        if act in KNOWN_PLAN_ACTIONS:
+            filtered.append(step)
+        else:
+            print(f"[Sanitize] Dropping unknown action: {act!r}")
+
+    return filtered
 
 
 def get_vla_plan(image_path, user_command):
@@ -260,6 +325,180 @@ GRIPPER_CLEARANCE = 0.065  # extra clearance to avoid table collisions
 OBJECT_TOP_OFFSET = 0.02  # half-height for cubes in the scene
 GRAB_HEIGHT_OFFSET = -0.005  # lower toward the cube mid-height for a better grip
 GRIPPER_TIP_NAME = "gripper_tip"
+
+READY_EE_POS = np.array([0.4, 0.0, 0.7])
+# Matches main() initial qpos[6]; used to undo redundant wrist (joint7) after emote_rotate_wrist.
+HOME_JOINT7 = 0.785
+READY_EE_DISTANCE_TOL = 0.045
+EMOTE_SETTLE_STEPS = 25
+EMOTE_Z_MIN = 0.38
+
+
+def get_ee_position(m, d):
+    ee_site_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, GRIPPER_TIP_NAME)
+    if ee_site_id != -1:
+        return d.site_xpos[ee_site_id].copy()
+    ee_body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "hand")
+    return d.xpos[ee_body_id].copy()
+
+
+def is_near_ready_pose(m, d):
+    return float(np.linalg.norm(get_ee_position(m, d) - READY_EE_POS)) < READY_EE_DISTANCE_TOL
+
+
+def settle_physics(m, d, viewer, steps=EMOTE_SETTLE_STEPS):
+    for _ in range(steps):
+        mujoco.mj_step(m, d)
+        viewer.sync()
+        time.sleep(0.005)
+
+
+def ensure_ready_pose(m, d, viewer):
+    if is_near_ready_pose(m, d):
+        return
+    solve_ik(READY_EE_POS.copy(), m, d, viewer, steps=350)
+    settle_physics(m, d, viewer)
+
+
+def return_to_ready_pose(m, d, viewer):
+    """IK to ready EE position, then reset wrist joint7 (position-only IK cannot fix redundant angle)."""
+    solve_ik(READY_EE_POS.copy(), m, d, viewer, steps=350)
+    slew_joint7_to(m, d, viewer, HOME_JOINT7, interp_steps=45, hold_each=3)
+    solve_ik(READY_EE_POS.copy(), m, d, viewer, steps=200)
+    settle_physics(m, d, viewer)
+
+
+def go_to_home_pose(m, d, viewer):
+    """Always run IK to ready pose (no distance shortcut). Use before executing a plan."""
+    return_to_ready_pose(m, d, viewer)
+
+
+def emote_target_from_offset(dx, dy, dz):
+    target = READY_EE_POS.copy() + np.array([dx, dy, dz], dtype=float)
+    target[2] = max(target[2], EMOTE_Z_MIN)
+    return target
+
+
+def clamp_joint7(m, angle):
+    jid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "joint7")
+    if jid == -1:
+        return float(np.clip(angle, -2.8973, 2.8973))
+    lo, hi = m.jnt_range[jid]
+    return float(np.clip(angle, lo, hi))
+
+
+def slew_joint7_to(m, d, viewer, target_angle, interp_steps=40, hold_each=4):
+    target_angle = clamp_joint7(m, target_angle)
+    start = float(d.ctrl[6])
+    for k in range(1, interp_steps + 1):
+        alpha = k / interp_steps
+        d.ctrl[6] = start + alpha * (target_angle - start)
+        for _ in range(hold_each):
+            mujoco.mj_step(m, d)
+            viewer.sync()
+            time.sleep(0.003)
+
+
+def set_gripper_quick(ctrl_value, m, d, viewer, steps=40):
+    for i in range(7, len(d.ctrl)):
+        d.ctrl[i] = ctrl_value
+    for _ in range(steps):
+        mujoco.mj_step(m, d)
+        viewer.sync()
+        time.sleep(0.003)
+
+
+def run_emote(action, m, d, viewer):
+    if action == "emote_nod":
+        _emote_nod(m, d, viewer, cycles=4)
+    elif action == "emote_yes":
+        _emote_nod(m, d, viewer, cycles=2)
+    elif action in ("emote_shake_no", "emote_no"):
+        _emote_shake(m, d, viewer, cycles=5 if action == "emote_shake_no" else 3)
+    elif action == "emote_wave":
+        _emote_wave(m, d, viewer)
+    elif action == "emote_dance":
+        _emote_dance(m, d, viewer)
+    elif action == "emote_clap":
+        _emote_clap(m, d, viewer)
+    elif action == "emote_rotate_wrist":
+        _emote_rotate_wrist(m, d, viewer)
+    elif action == "emote_bow":
+        _emote_bow(m, d, viewer)
+    elif action == "emote_celebrate":
+        _emote_celebrate(m, d, viewer)
+
+
+def _emote_nod(m, d, viewer, cycles=4):
+    for _ in range(cycles):
+        solve_ik(emote_target_from_offset(0, 0, -0.07), m, d, viewer, steps=120)
+        solve_ik(emote_target_from_offset(0, 0, 0.05), m, d, viewer, steps=120)
+
+
+def _emote_shake(m, d, viewer, cycles=5):
+    for _ in range(cycles):
+        solve_ik(emote_target_from_offset(0, 0.09, 0), m, d, viewer, steps=100)
+        solve_ik(emote_target_from_offset(0, -0.09, 0), m, d, viewer, steps=100)
+
+
+def _emote_wave(m, d, viewer):
+    base_j7 = float(d.ctrl[6])
+    for _ in range(4):
+        solve_ik(emote_target_from_offset(0, 0.1, 0.04), m, d, viewer, steps=90)
+        slew_joint7_to(m, d, viewer, base_j7 + 0.45, interp_steps=18, hold_each=3)
+        solve_ik(emote_target_from_offset(0, -0.02, 0.04), m, d, viewer, steps=90)
+        slew_joint7_to(m, d, viewer, base_j7 - 0.35, interp_steps=18, hold_each=3)
+    slew_joint7_to(m, d, viewer, base_j7, interp_steps=22, hold_each=3)
+
+
+def _emote_dance(m, d, viewer):
+    seq = [
+        (0.0, 0.1, 0.05),
+        (0.0, -0.1, 0.0),
+        (0.05, 0.0, 0.06),
+        (-0.05, 0.0, 0.0),
+        (0.0, 0.08, -0.04),
+        (0.0, -0.08, 0.03),
+    ]
+    for dx, dy, dz in seq:
+        solve_ik(emote_target_from_offset(dx, dy, dz), m, d, viewer, steps=100)
+    j0 = float(d.ctrl[6])
+    slew_joint7_to(m, d, viewer, j0 + 1.2, interp_steps=25, hold_each=2)
+    slew_joint7_to(m, d, viewer, j0 - 0.8, interp_steps=25, hold_each=2)
+    slew_joint7_to(m, d, viewer, j0, interp_steps=20, hold_each=2)
+
+
+def _emote_clap(m, d, viewer):
+    open_gripper(m, d, viewer)
+    solve_ik(READY_EE_POS.copy(), m, d, viewer, steps=200)
+    for _ in range(5):
+        set_gripper_quick(GRIPPER_CLOSED, m, d, viewer, steps=28)
+        set_gripper_quick(GRIPPER_OPEN, m, d, viewer, steps=28)
+    open_gripper(m, d, viewer)
+
+
+def _emote_rotate_wrist(m, d, viewer):
+    solve_ik(READY_EE_POS.copy(), m, d, viewer, steps=180)
+    start = float(d.ctrl[6])
+    target = start + 2.0 * np.pi
+    slew_joint7_to(m, d, viewer, target, interp_steps=70, hold_each=3)
+    settle_physics(m, d, viewer, steps=15)
+
+
+def _emote_bow(m, d, viewer):
+    solve_ik(emote_target_from_offset(0.06, 0, -0.14), m, d, viewer, steps=200)
+    settle_physics(m, d, viewer, steps=18)
+    solve_ik(READY_EE_POS.copy(), m, d, viewer, steps=220)
+
+
+def _emote_celebrate(m, d, viewer):
+    up = READY_EE_POS.copy() + np.array([0.0, 0.0, 0.16])
+    up[2] = max(up[2], EMOTE_Z_MIN)
+    solve_ik(up, m, d, viewer, steps=220)
+    settle_physics(m, d, viewer, steps=15)
+    wiggle = float(d.ctrl[6])
+    slew_joint7_to(m, d, viewer, wiggle + 0.6, interp_steps=15, hold_each=3)
+    slew_joint7_to(m, d, viewer, wiggle - 0.6, interp_steps=15, hold_each=3)
 
 
 def set_gripper(ctrl_value, m, d, viewer, steps=GRIPPER_MOVE_STEPS):
@@ -306,6 +545,12 @@ def approach_object(target_pos, m, d, viewer):
 def execute_plan(plan, m, d, viewer, user_command=None):
     print("\n[Execution] Executing VLA Plan:")
     command_target = get_target_from_command(user_command)
+    if is_near_ready_pose(m, d):
+        print("[Execution] Near home; locking in exact ready pose before plan steps.")
+    else:
+        print("[Execution] Not at home; moving to ready pose before plan steps.")
+    go_to_home_pose(m, d, viewer)
+    prev_action = None
     for step in plan:
         action = step.get("action")
         target = normalize_target_name(step.get("target_name"))
@@ -315,12 +560,23 @@ def execute_plan(plan, m, d, viewer, user_command=None):
             step["target_name"] = target
 
         print(f" -> {action} | Target: {target}")
-        
+
+        if action in FUN_ACTIONS:
+            ensure_ready_pose(m, d, viewer)
+            run_emote(action, m, d, viewer)
+            return_to_ready_pose(m, d, viewer)
+            prev_action = action
+            continue
+
+        if not _skip_ensure_home_before_step(prev_action, action):
+            ensure_ready_pose(m, d, viewer)
+
         if action in ["move_to_object", "hover_over_object"]:
             if target:
                 obj_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, target)
                 if obj_id == -1:
                     print(f"[Execution] Unknown target body '{target}', skipping action")
+                    prev_action = action
                     continue
                 target_pos = d.xpos[obj_id].copy()
                 
@@ -330,13 +586,15 @@ def execute_plan(plan, m, d, viewer, user_command=None):
                     hover_over_object(target_pos, m, d, viewer)
                 
         elif action == "move_home":
-            solve_ik(np.array([0.4, 0.0, 0.7]), m, d, viewer)
+            solve_ik(READY_EE_POS.copy(), m, d, viewer)
             
         elif action == "close_gripper":
             close_gripper(m, d, viewer)
                 
         elif action == "open_gripper":
             open_gripper(m, d, viewer)
+
+        prev_action = action
 
 # ---------------------------------------------------------
 # 4. Main Loop
