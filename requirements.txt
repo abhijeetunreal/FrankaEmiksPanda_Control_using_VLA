@@ -2,3 +2,9 @@ mujoco
 opencv-python
 numpy
 openai
+fastapi
+uvicorn[standard]
+python-multipart
+glfw
+PyOpenGL
+imgui[glfw]

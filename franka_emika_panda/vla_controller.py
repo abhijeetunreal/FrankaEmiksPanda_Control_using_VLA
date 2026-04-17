@@ -1,5 +1,4 @@
 import mujoco
-import mujoco.viewer
 import cv2
 import time
 import json
@@ -7,7 +6,16 @@ import numpy as np
 import os
 import re
 import base64
+from typing import Protocol, runtime_checkable
+
 from openai import OpenAI
+
+
+@runtime_checkable
+class ViewerSync(Protocol):
+    """Minimal interface for visualization refresh (passive viewer or integrated GLFW window)."""
+
+    def sync(self) -> None: ...
 
 # ---------------------------------------------------------
 # 1. Configuration (Using GROQ)
@@ -596,46 +604,79 @@ def execute_plan(plan, m, d, viewer, user_command=None):
 
         prev_action = action
 
+
 # ---------------------------------------------------------
-# 4. Main Loop
+# 4. Scene load + VLA command pipeline (shared by CLI and integrated viewer)
 # ---------------------------------------------------------
-def main():
-    print("Loading Franka Panda Environment...")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    xml_path = os.path.join(script_dir, 'vla_scene.xml')
-    
+def load_vla_scene(script_dir: str):
+    """Load `vla_scene.xml`, set initial pose, and create an offscreen `Renderer` for VLA snapshots."""
+    xml_path = os.path.join(script_dir, "vla_scene.xml")
     m = mujoco.MjModel.from_xml_path(xml_path)
     d = mujoco.MjData(m)
-    
+
     d.qpos[:7] = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]
     d.ctrl[:7] = d.qpos[:7]
     for i in range(7, len(d.ctrl)):
         d.ctrl[i] = GRIPPER_OPEN
     mujoco.mj_forward(m, d)
-    
+
     renderer = mujoco.Renderer(m, 480, 640)
+    return m, d, renderer
+
+
+def capture_workspace_image(m, d, renderer, script_dir: str) -> str:
+    """Render `main_cam` to a JPEG path for the vision model."""
+    image_path = os.path.join(script_dir, "current_state.jpg")
+    renderer.update_scene(d, camera="main_cam")
+    cv2.imwrite(image_path, cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR))
+    return image_path
+
+
+def process_user_command(
+    cmd: str,
+    m,
+    d,
+    renderer,
+    script_dir: str,
+    viewer: ViewerSync,
+) -> None:
+    """Capture workspace, call VLA, sanitize, and execute. Blocks until done."""
+    image_path = capture_workspace_image(m, d, renderer, script_dir)
+    try:
+        plan = get_vla_plan(image_path, cmd)
+        if plan:
+            plan = sanitize_execution_plan(plan, cmd, d)
+            print(json.dumps(plan, indent=2))
+            execute_plan(plan, m, d, viewer, cmd)
+        else:
+            print("[!] No actionable plan generated.")
+    finally:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+
+
+# ---------------------------------------------------------
+# 5. Main Loop (terminal CLI)
+# ---------------------------------------------------------
+def main():
+    import mujoco.viewer  # lazy: avoids loading simulate/GUI hooks when using integrated_viewer only
+
+    print("Loading Franka Panda Environment...")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    m, d, renderer = load_vla_scene(script_dir)
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         for _ in range(200):
-            mujoco.mj_step(m, d); viewer.sync()
-            
+            mujoco.mj_step(m, d)
+            viewer.sync()
+
         while True:
             cmd = input("\nEnter robot command (or 'quit'): ")
-            if cmd.lower() in ['quit', 'exit']: break
-                
-            renderer.update_scene(d, camera="main_cam")
-            image_path = os.path.join(script_dir, "current_state.jpg")
-            cv2.imwrite(image_path, cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR))
-            
-            plan = get_vla_plan(image_path, cmd)
-            if plan:
-                plan = sanitize_execution_plan(plan, cmd, d)
-                print(json.dumps(plan, indent=2))
-                execute_plan(plan, m, d, viewer, cmd)
-            else:
-                print("[!] No actionable plan generated.")
-                
-            if os.path.exists(image_path): os.remove(image_path)
+            if cmd.lower() in ["quit", "exit"]:
+                break
+
+            process_user_command(cmd, m, d, renderer, script_dir, viewer)
+
 
 if __name__ == "__main__":
     main()
