@@ -126,12 +126,6 @@ If you prefer a file-based example, copy `.env.example` to `.env` and fill in yo
 
 6. The controller executes the plan by moving the arm, hovering, and operating the gripper.
 
-## Known limitations
-
-- This is a prototype: the LLM prompt assumes a fixed scene with three objects.
-- Object names must match the built-in target mapping.
-- The inverse kinematics solver is simple and may not handle all complex motions.
-- Real-time perception is limited to rendered scene snapshots.
 
 ## Additional information
 
